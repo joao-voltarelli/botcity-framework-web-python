@@ -1894,7 +1894,7 @@ class WebBot(BaseBot):
         return len(files_path)
 
     @contextmanager
-    def wait_for_new_file(self, path=None, file_extension="", current_count=0, timeout=60000):
+    def wait_for_new_file(self, path=None, file_extension="", current_count=None, timeout=60000):
         """
         Wait for a new file to be available on disk without the file path.
 
