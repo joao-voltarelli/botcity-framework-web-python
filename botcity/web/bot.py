@@ -4,7 +4,6 @@ import glob
 import io
 import json
 import logging
-import multiprocessing
 import os
 import platform
 import random
@@ -250,19 +249,18 @@ class WebBot(BaseBot):
             width (int): The desired width.
             height (int): The desired height.
         """
-        width = width or self._dimensions[0]
-        height = height or self._dimensions[1]
+        self._dimensions = (width or 1600, height or 900)
 
         if self.headless:
             # When running headless the window size is the viewport size
-            window_size = (width, height)
+            window_size = self._dimensions
         else:
             # When running non-headless we need to account for the borders and etc
             # So the size must be bigger to have the same viewport size as before
             window_size = self._driver.execute_script("""
                 return [window.outerWidth - window.innerWidth + arguments[0],
                   window.outerHeight - window.innerHeight + arguments[1]];
-                """, width, height)
+                """, *self._dimensions)
         self._driver.set_window_size(*window_size)
 
     def _webdriver_command(self, command, params=None, req_type="POST"):
@@ -407,7 +405,6 @@ class WebBot(BaseBot):
             print('Warning: Ignoring best=False for now. It will be supported in the future.')
 
         start_time = time.time()
-        n_cpus = multiprocessing.cpu_count() - 1
 
         while True:
             elapsed_time = (time.time() - start_time) * 1000
@@ -417,8 +414,7 @@ class WebBot(BaseBot):
             haystack = self.screenshot()
             helper = functools.partial(self._find_multiple_helper, haystack, region, matching, grayscale)
 
-            with multiprocessing.Pool(processes=n_cpus) as pool:
-                results = pool.map(helper, paths)
+            results = [helper(p) for p in paths]
 
             results = [r for r in results]
             if None in results:
@@ -767,7 +763,9 @@ class WebBot(BaseBot):
         if not best:
             print('Warning: Ignoring best=False for now. It will be supported in the future.')
 
-        it = cv2find.locate_all_opencv(self.state.map_images[label], region=region, confidence=matching)
+        haystack = self.get_screen_image()
+        it = cv2find.locate_all_opencv(self.state.map_images[label], haystack_image=haystack,
+                                       region=region, confidence=matching)
         try:
             ele = next(it)
         except StopIteration:
@@ -1015,6 +1013,17 @@ class WebBot(BaseBot):
         Args:
             timeout (int, optional): Timeout in millis. Defaults to 120000.
         """
+        if self.browser in [Browser.CHROME, Browser.EDGE] and self.headless:
+            start_time = time.time()
+            while True:
+                elapsed_time = (time.time() - start_time) * 1000
+                if elapsed_time > timeout:
+                    return False
+                downloads_count = self.get_file_count(self.download_folder_path, ".crdownload")
+                if downloads_count == 0:
+                    return True
+                self.sleep(config.DEFAULT_SLEEP_AFTER_ACTION)
+
         wait_method = BROWSER_CONFIGS.get(self.browser).get("wait_for_downloads")
         # waits for all the files to be completed
         WebDriverWait(self._driver, timeout/1000, 1).until(wait_method)
@@ -1102,10 +1111,23 @@ class WebBot(BaseBot):
         """
         self._driver.switch_to.default_content()
 
+    def install_firefox_extension(self, extension):
+        """
+        Install an extension in the Firefox browser.
+        This will start the browser if it was not started yet.
+
+        Args:
+            extension (str): The path of the .xpi extension to be loaded.
+        """
+        if self.browser != Browser.FIREFOX:
+            raise ValueError("install_firefox_extension only works with Firefox.")
+        if not self._driver:
+            self.start_browser()
+        self._driver.install_addon(os.path.abspath(extension))
+
     #######
     # Mouse
     #######
-    @only_if_element
     def click_on(self, label):
         """
         Click on the element.
@@ -1114,7 +1136,9 @@ class WebBot(BaseBot):
             label (str): The image identifier
         """
         x, y = self.get_element_coords_centered(label)
-        self.click(x, y)
+        if None in (x, y):
+            raise ValueError(f'Element not available. Cannot find {label}.')
+        self.click_at(x, y)
 
     @only_if_element
     def get_last_x(self):
@@ -1197,7 +1221,7 @@ class WebBot(BaseBot):
             wait_after (int, optional): Interval to wait after clicking on the element.
             clicks (int, optional): Number of times to click. Defaults to 1.
             interval_between_clicks (int, optional): The interval between clicks in ms. Defaults to 0.
-            button (str, optional): One of 'left', 'right', 'middle'. Defaults to 'left'
+            button (str, optional): One of 'left', 'right'. Defaults to 'left'
         """
         x, y = self.state.center()
         self.click_at(x, y, clicks=clicks, button=button, interval_between_clicks=interval_between_clicks)
@@ -1215,7 +1239,7 @@ class WebBot(BaseBot):
             wait_after (int, optional): Interval to wait after clicking on the element.
             clicks (int, optional): Number of times to click. Defaults to 1.
             interval_between_clicks (int, optional): The interval between clicks in ms. Defaults to 0.
-            button (str, optional): One of 'left', 'right', 'middle'. Defaults to 'left'
+            button (str, optional): One of 'left', 'right'. Defaults to 'left'
         """
         x = self.state.x() + x
         y = self.state.y() + y
@@ -1857,6 +1881,9 @@ class WebBot(BaseBot):
             if elapsed_time > timeout:
                 return False
             if os.path.isfile(path) and os.access(path, os.R_OK):
+                if self.browser == Browser.FIREFOX and os.path.exists(path + '.part'):
+                    # if *.part exists, the download is not completed.
+                    continue
                 return True
             self.sleep(config.DEFAULT_SLEEP_AFTER_ACTION)
 
